@@ -29,7 +29,8 @@ object DavParser {
             var isCalendar = false
 
             while (eventType != XmlPullParser.END_DOCUMENT) {
-                val tagName = parser.name?.lowercase(Locale.ROOT) ?: ""
+                val rawName = parser.name?.lowercase(Locale.ROOT) ?: ""
+                val tagName = rawName.substringAfter(":")
 
                 when (eventType) {
                     XmlPullParser.START_TAG -> {
@@ -108,7 +109,8 @@ object DavParser {
             var isAddressBook = false
 
             while (eventType != XmlPullParser.END_DOCUMENT) {
-                val tagName = parser.name?.lowercase(Locale.ROOT) ?: ""
+                val rawName = parser.name?.lowercase(Locale.ROOT) ?: ""
+                val tagName = rawName.substringAfter(":")
 
                 when (eventType) {
                     XmlPullParser.START_TAG -> {

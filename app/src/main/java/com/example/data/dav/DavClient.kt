@@ -29,8 +29,11 @@ class DavClient {
         traceBuilder: StringBuilder
     ): DavResult<String> = withContext(Dispatchers.IO) {
         val cleanUrl = normalizeUrl(serverUrl)
-        traceBuilder.appendLine("➜ Testing connection to: $cleanUrl")
+        traceBuilder.appendLine("➜ Normalizing host URL: $cleanUrl")
         traceBuilder.appendLine("➜ Authenticating as user: $username")
+
+        val endpointsToTry = getPossibleTestEndpoints(serverUrl, username)
+        var lastError: DavResult.Error? = null
 
         val propfindBody = """
             <?xml version="1.0" encoding="utf-8"?>
@@ -42,37 +45,45 @@ class DavClient {
             </d:propfind>
         """.trimIndent()
 
-        val request = Request.Builder()
-            .url(cleanUrl)
-            .addHeader("Authorization", Credentials.basic(username, password))
-            .addHeader("Depth", "1")
-            .method("PROPFIND", propfindBody.toRequestBody(xmlMediaType))
-            .build()
+        for (endpoint in endpointsToTry) {
+            traceBuilder.appendLine("➜ Probing DAV endpoint: $endpoint")
+            val request = Request.Builder()
+                .url(endpoint)
+                .addHeader("Authorization", Credentials.basic(username, password))
+                .addHeader("User-Agent", "ownCloud-Sync-Android/1.0")
+                .addHeader("Depth", "1")
+                .method("PROPFIND", propfindBody.toRequestBody(xmlMediaType))
+                .build()
 
-        try {
-            val response = client.newCall(request).execute()
-            val code = response.code
-            val body = response.body?.string() ?: ""
+            try {
+                val response = client.newCall(request).execute()
+                val code = response.code
 
-            traceBuilder.appendLine("✔ HTTP Status $code (${response.message})")
-
-            if (response.isSuccessful || code == 207) {
-                traceBuilder.appendLine("✔ Authentication & DAV endpoint handshake successful!")
-                DavResult.Success("Connected successfully (HTTP $code)")
-            } else if (code == 401) {
-                traceBuilder.appendLine("✖ Authentication failed (HTTP 401 Unauthorized). Please verify username/password or app password.")
-                DavResult.Error("HTTP 401 Unauthorized - Check username/password", code)
-            } else if (code == 404) {
-                traceBuilder.appendLine("✖ Endpoint not found (HTTP 404). Trying auto-discovered CalDAV paths...")
-                DavResult.Error("HTTP 404 Not Found - Path might be incorrect", code)
-            } else {
-                traceBuilder.appendLine("✖ Connection error: HTTP $code - ${response.message}")
-                DavResult.Error("Server returned HTTP $code (${response.message})", code)
+                if (response.isSuccessful || code == 207) {
+                    traceBuilder.appendLine("✔ HTTP Status $code (${response.message}) on $endpoint")
+                    traceBuilder.appendLine("✔ Authentication & DAV endpoint handshake successful!")
+                    return@withContext DavResult.Success("Connected successfully to ownCloud DAV endpoint ($endpoint)")
+                } else if (code == 401) {
+                    traceBuilder.appendLine("✖ Authentication failed (HTTP 401 Unauthorized) on $endpoint. Please verify username/password or app password.")
+                    return@withContext DavResult.Error("HTTP 401 Unauthorized - Check username/password or app password", code)
+                } else if (code == 405) {
+                    traceBuilder.appendLine("  └ HTTP 405 Method Not Allowed on $endpoint (Host root, probing next DAV path...)")
+                    lastError = DavResult.Error("HTTP 405 Method Not Allowed", code)
+                } else if (code == 404) {
+                    traceBuilder.appendLine("  └ HTTP 404 Not Found on $endpoint (Probing next path...)")
+                    lastError = DavResult.Error("HTTP 404 Not Found", code)
+                } else {
+                    traceBuilder.appendLine("  └ HTTP Status $code (${response.message}) on $endpoint")
+                    lastError = DavResult.Error("Server returned HTTP $code (${response.message})", code)
+                }
+            } catch (e: Exception) {
+                traceBuilder.appendLine("  └ Probe error on $endpoint: ${e.message}")
+                lastError = DavResult.Error("Connection failed: ${e.message}", cause = e)
             }
-        } catch (e: Exception) {
-            traceBuilder.appendLine("✖ Exception during connection: ${e.localizedMessage}")
-            DavResult.Error("Connection failed: ${e.message}", cause = e)
         }
+
+        traceBuilder.appendLine("✖ Unable to locate active DAV service on host.")
+        lastError ?: DavResult.Error("Could not reach a valid ownCloud DAV endpoint. Please check host URL.")
     }
 
     suspend fun discoverCalendars(
@@ -289,6 +300,44 @@ class DavClient {
         return clean.trimEnd('/') + "/"
     }
 
+    private fun getPossibleTestEndpoints(serverUrl: String, username: String): List<String> {
+        val base = normalizeUrl(serverUrl)
+        val host = if (base.contains("://")) {
+            val scheme = base.substringBefore("://")
+            val rest = base.substringAfter("://").substringBefore("/")
+            "$scheme://$rest"
+        } else base
+
+        val isDirectDavPath = base.contains("remote.php") || base.contains("/dav")
+        val candidates = mutableListOf<String>()
+
+        if (isDirectDavPath) {
+            candidates.add(base)
+        }
+
+        // Standard ownCloud / Nextcloud DAV endpoints
+        candidates.add("${base}remote.php/dav/")
+        candidates.add("${base}remote.php/dav/calendars/$username/")
+        candidates.add("${base}remote.php/dav/addressbooks/users/$username/")
+        candidates.add("${base}remote.php/dav/addressbooks/$username/")
+        candidates.add("${base}remote.php/webdav/")
+        candidates.add("${base}remote.php/caldav/")
+        candidates.add("${base}remote.php/carddav/")
+
+        if (!base.startsWith("$host/owncloud/")) {
+            candidates.add("${host}/owncloud/remote.php/dav/")
+        }
+        if (!base.startsWith("$host/nextcloud/")) {
+            candidates.add("${host}/nextcloud/remote.php/dav/")
+        }
+
+        if (!isDirectDavPath) {
+            candidates.add(base)
+        }
+
+        return candidates.distinct()
+    }
+
     private fun getPossibleDavEndpoints(serverUrl: String, username: String, type: String): List<String> {
         val base = normalizeUrl(serverUrl)
         val host = if (base.contains("://")) {
@@ -298,16 +347,41 @@ class DavClient {
         } else base
 
         val isCal = type == "calendars"
+        val isDirectDavPath = base.contains("remote.php") || base.contains("/dav")
+        val candidates = mutableListOf<String>()
 
-        return listOf(
-            base,
-            "${base}remote.php/dav/",
-            "${base}remote.php/dav/${if (isCal) "calendars" else "addressbooks"}/$username/",
-            "${base}remote.php/${if (isCal) "caldav" else "carddav"}/",
-            "${base}remote.php/${if (isCal) "caldav" else "carddav"}/${if (isCal) "calendars" else "addressbooks"}/$username/",
-            "${host}/remote.php/dav/${if (isCal) "calendars" else "addressbooks"}/$username/",
-            "${host}/remote.php/dav/"
-        ).distinct()
+        if (isDirectDavPath) {
+            candidates.add(base)
+        }
+
+        if (isCal) {
+            candidates.add("${base}remote.php/dav/calendars/$username/")
+            candidates.add("${base}remote.php/dav/")
+            candidates.add("${base}remote.php/dav/principals/users/$username/")
+            candidates.add("${base}remote.php/caldav/calendars/$username/")
+            candidates.add("${base}remote.php/caldav/")
+            candidates.add("${host}/remote.php/dav/calendars/$username/")
+            candidates.add("${host}/remote.php/dav/")
+            candidates.add("${host}/owncloud/remote.php/dav/calendars/$username/")
+            candidates.add("${host}/nextcloud/remote.php/dav/calendars/$username/")
+        } else {
+            candidates.add("${base}remote.php/dav/addressbooks/users/$username/")
+            candidates.add("${base}remote.php/dav/addressbooks/$username/")
+            candidates.add("${base}remote.php/dav/")
+            candidates.add("${base}remote.php/dav/principals/users/$username/")
+            candidates.add("${base}remote.php/carddav/addressbooks/$username/")
+            candidates.add("${base}remote.php/carddav/")
+            candidates.add("${host}/remote.php/dav/addressbooks/users/$username/")
+            candidates.add("${host}/remote.php/dav/")
+            candidates.add("${host}/owncloud/remote.php/dav/addressbooks/users/$username/")
+            candidates.add("${host}/nextcloud/remote.php/dav/addressbooks/users/$username/")
+        }
+
+        if (!isDirectDavPath) {
+            candidates.add(base)
+        }
+
+        return candidates.distinct()
     }
 }
 
