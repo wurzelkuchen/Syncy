@@ -1,0 +1,6 @@
+{
+  "name": "ownCloud Sync",
+  "description": "Sync ownCloud calendars and contacts via CalDAV and CardDAV with detailed history logs and battery-optimized background updates.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
