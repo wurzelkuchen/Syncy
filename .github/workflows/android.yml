@@ -1,4 +1,4 @@
-# Android CI
+# # Android CI
 # Added workflow_dispatch so this can be started manually from the GitHub Actions web UI.
 # The manual run accepts an optional 'gradle_task' input (default: 'build').
 
@@ -40,4 +40,4 @@ jobs:
       run: chmod +x gradlew
 
     - name: Build with Gradle
-      run: ./gradlew $GRADLE_TASK
+      run: ./gradlew '${{ env.GRADLE_TASK }}'
