@@ -11,6 +11,12 @@ data class DiscoveredAddressBook(
     val displayName: String
 )
 
+data class DavHomeSets(
+    val calendarHomeSets: List<String> = emptyList(),
+    val addressBookHomeSets: List<String> = emptyList(),
+    val principalUrls: List<String> = emptyList()
+)
+
 data class ParsedIcsEvent(
     val uid: String,
     val title: String,

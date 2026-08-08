@@ -62,7 +62,11 @@ class DavClient {
                 if (response.isSuccessful || code == 207) {
                     traceBuilder.appendLine("✔ HTTP Status $code (${response.message}) on $endpoint")
                     traceBuilder.appendLine("✔ Authentication & DAV endpoint handshake successful!")
-                    return@withContext DavResult.Success("Connected successfully to ownCloud DAV endpoint ($endpoint)")
+
+                    // Perform quick home-set probe to verify calendars/contacts
+                    val homeSets = discoverHomeSets(serverUrl, username, password, traceBuilder)
+                    val calSummary = if (homeSets.calendarHomeSets.isNotEmpty()) "Calendars home detected: ${homeSets.calendarHomeSets.first()}" else "PROPFIND active"
+                    return@withContext DavResult.Success("Connected successfully to ownCloud DAV endpoint ($calSummary)")
                 } else if (code == 401) {
                     traceBuilder.appendLine("✖ Authentication failed (HTTP 401 Unauthorized) on $endpoint. Please verify username/password or app password.")
                     return@withContext DavResult.Error("HTTP 401 Unauthorized - Check username/password or app password", code)
@@ -86,13 +90,105 @@ class DavClient {
         lastError ?: DavResult.Error("Could not reach a valid ownCloud DAV endpoint. Please check host URL.")
     }
 
+    private suspend fun discoverHomeSets(
+        serverUrl: String,
+        username: String,
+        password: String,
+        traceBuilder: StringBuilder
+    ): DavHomeSets = withContext(Dispatchers.IO) {
+        val propfindBody = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:card="urn:ietf:params:xml:ns:carddav">
+               <d:prop>
+                  <d:current-user-principal/>
+                  <c:calendar-home-set/>
+                  <card:addressbook-home-set/>
+                  <d:displayname/>
+               </d:prop>
+            </d:propfind>
+        """.trimIndent()
+
+        val candidateUrls = getPossibleTestEndpoints(serverUrl, username)
+        var calHomeSets = mutableListOf<String>()
+        var abHomeSets = mutableListOf<String>()
+        var principalUrls = mutableListOf<String>()
+
+        for (url in candidateUrls) {
+            val request = Request.Builder()
+                .url(url)
+                .addHeader("Authorization", Credentials.basic(username, password))
+                .addHeader("User-Agent", "ownCloud-Sync-Android/1.0")
+                .addHeader("Depth", "0")
+                .method("PROPFIND", propfindBody.toRequestBody(xmlMediaType))
+                .build()
+
+            try {
+                val response = client.newCall(request).execute()
+                if (response.isSuccessful || response.code == 207) {
+                    val xml = response.body?.string() ?: ""
+                    val homeSets = DavParser.parseHomeSetsXml(xml, url)
+
+                    calHomeSets.addAll(homeSets.calendarHomeSets)
+                    abHomeSets.addAll(homeSets.addressBookHomeSets)
+                    principalUrls.addAll(homeSets.principalUrls)
+
+                    if (homeSets.calendarHomeSets.isNotEmpty() || homeSets.addressBookHomeSets.isNotEmpty()) {
+                        traceBuilder.appendLine("  └ Discovered server home-sets from $url:")
+                        if (homeSets.calendarHomeSets.isNotEmpty()) {
+                            traceBuilder.appendLine("    • Calendar Home: ${homeSets.calendarHomeSets.joinToString()}")
+                        }
+                        if (homeSets.addressBookHomeSets.isNotEmpty()) {
+                            traceBuilder.appendLine("    • AddressBook Home: ${homeSets.addressBookHomeSets.joinToString()}")
+                        }
+                        break
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        if (calHomeSets.isEmpty() && abHomeSets.isEmpty() && principalUrls.isNotEmpty()) {
+            for (pUrl in principalUrls.distinct()) {
+                traceBuilder.appendLine("➜ Querying user principal URL: $pUrl")
+                val request = Request.Builder()
+                    .url(pUrl)
+                    .addHeader("Authorization", Credentials.basic(username, password))
+                    .addHeader("User-Agent", "ownCloud-Sync-Android/1.0")
+                    .addHeader("Depth", "0")
+                    .method("PROPFIND", propfindBody.toRequestBody(xmlMediaType))
+                    .build()
+                try {
+                    val response = client.newCall(request).execute()
+                    if (response.isSuccessful || response.code == 207) {
+                        val xml = response.body?.string() ?: ""
+                        val homeSets = DavParser.parseHomeSetsXml(xml, pUrl)
+                        calHomeSets.addAll(homeSets.calendarHomeSets)
+                        abHomeSets.addAll(homeSets.addressBookHomeSets)
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+
+        DavHomeSets(
+            calendarHomeSets = calHomeSets.distinct(),
+            addressBookHomeSets = abHomeSets.distinct(),
+            principalUrls = principalUrls.distinct()
+        )
+    }
+
     suspend fun discoverCalendars(
         serverUrl: String,
         username: String,
         password: String,
         traceBuilder: StringBuilder
     ): List<DiscoveredCalendar> = withContext(Dispatchers.IO) {
-        val urlsToTry = getPossibleDavEndpoints(serverUrl, username, "calendars")
+        traceBuilder.appendLine("➜ Auto-discovering CalDAV calendars...")
+        val homeSets = discoverHomeSets(serverUrl, username, password, traceBuilder)
+
+        val urlsToTry = mutableListOf<String>()
+        urlsToTry.addAll(homeSets.calendarHomeSets)
+        urlsToTry.addAll(getPossibleDavEndpoints(serverUrl, username, "calendars"))
+
+        val distinctUrls = urlsToTry.distinct()
         val resultList = mutableListOf<DiscoveredCalendar>()
 
         val propfindBody = """
@@ -106,32 +202,39 @@ class DavClient {
             </d:propfind>
         """.trimIndent()
 
-        for (url in urlsToTry) {
-            traceBuilder.appendLine("➜ Probing CalDAV endpoint: $url")
+        for (url in distinctUrls) {
+            traceBuilder.appendLine("➜ Probing CalDAV collection (Depth 1): $url")
             val request = Request.Builder()
                 .url(url)
                 .addHeader("Authorization", Credentials.basic(username, password))
+                .addHeader("User-Agent", "ownCloud-Sync-Android/1.0")
                 .addHeader("Depth", "1")
                 .method("PROPFIND", propfindBody.toRequestBody(xmlMediaType))
                 .build()
 
             try {
                 val response = client.newCall(request).execute()
-                traceBuilder.appendLine("  └ Response HTTP ${response.code}")
+                traceBuilder.appendLine("  └ Response HTTP ${response.code} (${response.message})")
                 if (response.isSuccessful || response.code == 207) {
                     val xml = response.body?.string() ?: ""
                     val calendars = DavParser.parseCalendarsXml(xml, url)
                     if (calendars.isNotEmpty()) {
-                        traceBuilder.appendLine("  └ Found ${calendars.size} calendar(s): ${calendars.joinToString { it.displayName }}")
+                        traceBuilder.appendLine("  └ Found ${calendars.size} calendar(s): ${calendars.joinToString { "${it.displayName} [${it.url}]" }}")
                         resultList.addAll(calendars)
-                        break
                     }
                 }
             } catch (e: Exception) {
                 traceBuilder.appendLine("  └ Probe error on $url: ${e.message}")
             }
         }
-        resultList.distinctBy { it.url }
+
+        val finalCalendars = resultList.distinctBy { it.url }
+        if (finalCalendars.isNotEmpty()) {
+            traceBuilder.appendLine("✔ Total calendars discovered: ${finalCalendars.size}")
+        } else {
+            traceBuilder.appendLine("⚠ No calendars discovered on probed CalDAV endpoints.")
+        }
+        finalCalendars
     }
 
     suspend fun discoverAddressBooks(
@@ -140,7 +243,14 @@ class DavClient {
         password: String,
         traceBuilder: StringBuilder
     ): List<DiscoveredAddressBook> = withContext(Dispatchers.IO) {
-        val urlsToTry = getPossibleDavEndpoints(serverUrl, username, "addressbooks")
+        traceBuilder.appendLine("➜ Auto-discovering CardDAV address books...")
+        val homeSets = discoverHomeSets(serverUrl, username, password, traceBuilder)
+
+        val urlsToTry = mutableListOf<String>()
+        urlsToTry.addAll(homeSets.addressBookHomeSets)
+        urlsToTry.addAll(getPossibleDavEndpoints(serverUrl, username, "addressbooks"))
+
+        val distinctUrls = urlsToTry.distinct()
         val resultList = mutableListOf<DiscoveredAddressBook>()
 
         val propfindBody = """
@@ -153,32 +263,39 @@ class DavClient {
             </d:propfind>
         """.trimIndent()
 
-        for (url in urlsToTry) {
-            traceBuilder.appendLine("➜ Probing CardDAV endpoint: $url")
+        for (url in distinctUrls) {
+            traceBuilder.appendLine("➜ Probing CardDAV collection (Depth 1): $url")
             val request = Request.Builder()
                 .url(url)
                 .addHeader("Authorization", Credentials.basic(username, password))
+                .addHeader("User-Agent", "ownCloud-Sync-Android/1.0")
                 .addHeader("Depth", "1")
                 .method("PROPFIND", propfindBody.toRequestBody(xmlMediaType))
                 .build()
 
             try {
                 val response = client.newCall(request).execute()
-                traceBuilder.appendLine("  └ Response HTTP ${response.code}")
+                traceBuilder.appendLine("  └ Response HTTP ${response.code} (${response.message})")
                 if (response.isSuccessful || response.code == 207) {
                     val xml = response.body?.string() ?: ""
                     val books = DavParser.parseAddressBooksXml(xml, url)
                     if (books.isNotEmpty()) {
-                        traceBuilder.appendLine("  └ Found ${books.size} address book(s): ${books.joinToString { it.displayName }}")
+                        traceBuilder.appendLine("  └ Found ${books.size} address book(s): ${books.joinToString { "${it.displayName} [${it.url}]" }}")
                         resultList.addAll(books)
-                        break
                     }
                 }
             } catch (e: Exception) {
                 traceBuilder.appendLine("  └ Probe error on $url: ${e.message}")
             }
         }
-        resultList.distinctBy { it.url }
+
+        val finalBooks = resultList.distinctBy { it.url }
+        if (finalBooks.isNotEmpty()) {
+            traceBuilder.appendLine("✔ Total address books discovered: ${finalBooks.size}")
+        } else {
+            traceBuilder.appendLine("⚠ No address books discovered on probed CardDAV endpoints.")
+        }
+        finalBooks
     }
 
     suspend fun fetchCalendarEvents(

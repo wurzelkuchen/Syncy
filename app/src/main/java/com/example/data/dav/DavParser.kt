@@ -11,6 +11,98 @@ import java.util.TimeZone
 object DavParser {
 
     /**
+     * Parses WebDAV PROPFIND XML response to discover calendar and address book home-set URLs
+     * and current-user-principal URLs.
+     */
+    fun parseHomeSetsXml(xml: String, baseUrl: String): DavHomeSets {
+        if (xml.isBlank()) return DavHomeSets()
+
+        val calHomeSets = mutableListOf<String>()
+        val abHomeSets = mutableListOf<String>()
+        val principals = mutableListOf<String>()
+
+        try {
+            val parser = Xml.newPullParser()
+            parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
+            parser.setInput(StringReader(xml))
+
+            var eventType = parser.eventType
+            var inCalHomeSet = false
+            var inAbHomeSet = false
+            var inPrincipal = false
+
+            while (eventType != XmlPullParser.END_DOCUMENT) {
+                val rawName = parser.name?.lowercase(Locale.ROOT) ?: ""
+                val tagName = rawName.substringAfter(":")
+
+                when (eventType) {
+                    XmlPullParser.START_TAG -> {
+                        when (tagName) {
+                            "calendar-home-set" -> inCalHomeSet = true
+                            "addressbook-home-set" -> inAbHomeSet = true
+                            "current-user-principal" -> inPrincipal = true
+                            "href" -> {
+                                val href = parser.nextText().trim()
+                                if (href.isNotBlank()) {
+                                    val fullUrl = resolveUrl(baseUrl, href)
+                                    val cleanUrl = fullUrl.trimEnd('/') + "/"
+                                    if (inCalHomeSet && !calHomeSets.contains(cleanUrl)) {
+                                        calHomeSets.add(cleanUrl)
+                                    } else if (inAbHomeSet && !abHomeSets.contains(cleanUrl)) {
+                                        abHomeSets.add(cleanUrl)
+                                    } else if (inPrincipal && !principals.contains(cleanUrl)) {
+                                        principals.add(cleanUrl)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    XmlPullParser.END_TAG -> {
+                        when (tagName) {
+                            "calendar-home-set" -> inCalHomeSet = false
+                            "addressbook-home-set" -> inAbHomeSet = false
+                            "current-user-principal" -> inPrincipal = false
+                        }
+                    }
+                }
+                eventType = parser.next()
+            }
+        } catch (_: Exception) {}
+
+        // Fallback regex scan for home-sets
+        if (calHomeSets.isEmpty()) {
+            val calMatches = Regex("(?i)<(?:\\w+:)?calendar-home-set>[\\s\\S]*?<(?:\\w+:)?href>([^<]+)").findAll(xml)
+            for (match in calMatches) {
+                val href = match.groupValues[1].trim()
+                val cleanUrl = resolveUrl(baseUrl, href).trimEnd('/') + "/"
+                if (!calHomeSets.contains(cleanUrl)) calHomeSets.add(cleanUrl)
+            }
+        }
+        if (abHomeSets.isEmpty()) {
+            val abMatches = Regex("(?i)<(?:\\w+:)?addressbook-home-set>[\\s\\S]*?<(?:\\w+:)?href>([^<]+)").findAll(xml)
+            for (match in abMatches) {
+                val href = match.groupValues[1].trim()
+                val cleanUrl = resolveUrl(baseUrl, href).trimEnd('/') + "/"
+                if (!abHomeSets.contains(cleanUrl)) abHomeSets.add(cleanUrl)
+            }
+        }
+        if (principals.isEmpty()) {
+            val pMatches = Regex("(?i)<(?:\\w+:)?current-user-principal>[\\s\\S]*?<(?:\\w+:)?href>([^<]+)").findAll(xml)
+            for (match in pMatches) {
+                val href = match.groupValues[1].trim()
+                val cleanUrl = resolveUrl(baseUrl, href).trimEnd('/') + "/"
+                if (!principals.contains(cleanUrl)) principals.add(cleanUrl)
+            }
+        }
+
+        return DavHomeSets(
+            calendarHomeSets = calHomeSets.distinct(),
+            addressBookHomeSets = abHomeSets.distinct(),
+            principalUrls = principals.distinct()
+        )
+    }
+
+    /**
      * Parses WebDAV PROPFIND XML response to discover calendars.
      */
     fun parseCalendarsXml(xml: String, baseUrl: String): List<DiscoveredCalendar> {
@@ -36,7 +128,9 @@ object DavParser {
                     XmlPullParser.START_TAG -> {
                         when (tagName) {
                             "href" -> {
-                                currentHref = parser.nextText().trim()
+                                if (currentHref.isBlank()) {
+                                    currentHref = parser.nextText().trim()
+                                }
                             }
                             "displayname" -> {
                                 currentDisplayName = parser.nextText().trim()
@@ -54,13 +148,22 @@ object DavParser {
                     }
                     XmlPullParser.END_TAG -> {
                         if (tagName == "response") {
-                            if (isCalendar && currentHref.isNotBlank()) {
+                            if (currentHref.isNotBlank()) {
                                 val fullUrl = resolveUrl(baseUrl, currentHref)
-                                val name = currentDisplayName.ifBlank {
-                                    fullUrl.trimEnd('/').substringAfterLast('/')
-                                }
-                                if (!list.any { it.url == fullUrl }) {
-                                    list.add(DiscoveredCalendar(fullUrl, name, currentColor))
+                                val cleanFullUrl = fullUrl.trimEnd('/') + "/"
+                                val lastSegment = cleanFullUrl.trimEnd('/').substringAfterLast('/')
+
+                                val isCalCollection = isCalendar || (
+                                    cleanFullUrl.contains("/calendars/", ignoreCase = true) &&
+                                    lastSegment.isNotBlank() &&
+                                    !lastSegment.equals("calendars", ignoreCase = true)
+                                )
+
+                                if (isCalCollection) {
+                                    val name = currentDisplayName.ifBlank { lastSegment }
+                                    if (name.isNotBlank() && !list.any { it.url == cleanFullUrl }) {
+                                        list.add(DiscoveredCalendar(cleanFullUrl, name, currentColor))
+                                    }
                                 }
                             }
                             currentHref = ""
@@ -73,15 +176,15 @@ object DavParser {
                 eventType = parser.next()
             }
         } catch (e: Exception) {
-            // Fallback string matching if XML is malformed or custom namespace
+            // Fallback string matching if XML parsing failed
             if (xml.contains("calendar", ignoreCase = true)) {
                 val hrefMatches = Regex("(?i)<(?:\\w+:)?href>([^<]+)").findAll(xml)
                 for (match in hrefMatches) {
                     val href = match.groupValues[1].trim()
                     if (href.contains("calendar", ignoreCase = true) || href.contains("dav", ignoreCase = true)) {
-                        val fullUrl = resolveUrl(baseUrl, href)
+                        val fullUrl = resolveUrl(baseUrl, href).trimEnd('/') + "/"
                         val name = fullUrl.trimEnd('/').substringAfterLast('/')
-                        if (name.isNotEmpty() && !list.any { it.url == fullUrl }) {
+                        if (name.isNotEmpty() && !name.equals("calendars", ignoreCase = true) && !list.any { it.url == fullUrl }) {
                             list.add(DiscoveredCalendar(fullUrl, name))
                         }
                     }
@@ -116,7 +219,9 @@ object DavParser {
                     XmlPullParser.START_TAG -> {
                         when (tagName) {
                             "href" -> {
-                                currentHref = parser.nextText().trim()
+                                if (currentHref.isBlank()) {
+                                    currentHref = parser.nextText().trim()
+                                }
                             }
                             "displayname" -> {
                                 currentDisplayName = parser.nextText().trim()
@@ -128,13 +233,23 @@ object DavParser {
                     }
                     XmlPullParser.END_TAG -> {
                         if (tagName == "response") {
-                            if (isAddressBook && currentHref.isNotBlank()) {
+                            if (currentHref.isNotBlank()) {
                                 val fullUrl = resolveUrl(baseUrl, currentHref)
-                                val name = currentDisplayName.ifBlank {
-                                    fullUrl.trimEnd('/').substringAfterLast('/')
-                                }
-                                if (!list.any { it.url == fullUrl }) {
-                                    list.add(DiscoveredAddressBook(fullUrl, name))
+                                val cleanFullUrl = fullUrl.trimEnd('/') + "/"
+                                val lastSegment = cleanFullUrl.trimEnd('/').substringAfterLast('/')
+
+                                val isAbCollection = isAddressBook || (
+                                    (cleanFullUrl.contains("/addressbooks/", ignoreCase = true) || cleanFullUrl.contains("/carddav/", ignoreCase = true)) &&
+                                    lastSegment.isNotBlank() &&
+                                    !lastSegment.equals("addressbooks", ignoreCase = true) &&
+                                    !lastSegment.equals("users", ignoreCase = true)
+                                )
+
+                                if (isAbCollection) {
+                                    val name = currentDisplayName.ifBlank { lastSegment }
+                                    if (name.isNotBlank() && !list.any { it.url == cleanFullUrl }) {
+                                        list.add(DiscoveredAddressBook(cleanFullUrl, name))
+                                    }
                                 }
                             }
                             currentHref = ""
@@ -152,9 +267,9 @@ object DavParser {
                 for (match in hrefMatches) {
                     val href = match.groupValues[1].trim()
                     if (href.contains("contacts", ignoreCase = true) || href.contains("addressbook", ignoreCase = true)) {
-                        val fullUrl = resolveUrl(baseUrl, href)
+                        val fullUrl = resolveUrl(baseUrl, href).trimEnd('/') + "/"
                         val name = fullUrl.trimEnd('/').substringAfterLast('/')
-                        if (name.isNotEmpty() && !list.any { it.url == fullUrl }) {
+                        if (name.isNotEmpty() && !name.equals("addressbooks", ignoreCase = true) && !list.any { it.url == fullUrl }) {
                             list.add(DiscoveredAddressBook(fullUrl, name))
                         }
                     }
