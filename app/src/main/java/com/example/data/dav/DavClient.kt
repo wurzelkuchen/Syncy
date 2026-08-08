@@ -306,7 +306,7 @@ class DavClient {
     ): ParsedCalendarFetchResult = withContext(Dispatchers.IO) {
         traceBuilder.appendLine("➜ Fetching calendar events from: $calendarUrl")
 
-        // Try REPORT calendar-query first, fallback to GET or PROPFIND
+        // 1. Try REPORT calendar-query
         val reportBody = """
             <?xml version="1.0" encoding="utf-8"?>
             <c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
@@ -325,32 +325,103 @@ class DavClient {
         val request = Request.Builder()
             .url(calendarUrl)
             .addHeader("Authorization", Credentials.basic(username, password))
+            .addHeader("User-Agent", "ownCloud-Sync-Android/1.0")
             .addHeader("Depth", "1")
             .method("REPORT", reportBody.toRequestBody(xmlMediaType))
             .build()
 
         try {
             val response = client.newCall(request).execute()
-            traceBuilder.appendLine("  └ REPORT status HTTP ${response.code}")
+            traceBuilder.appendLine("  └ REPORT status HTTP ${response.code} (${response.message})")
 
             if (response.isSuccessful || response.code == 207) {
                 val xml = response.body?.string() ?: ""
                 val events = DavParser.parseIcsEvents(xml)
-                traceBuilder.appendLine("  └ Parsed ${events.size} event(s) from $calendarUrl")
-                ParsedCalendarFetchResult(events, null)
-            } else {
-                // Try fallback GET
-                val getRequest = Request.Builder()
-                    .url(calendarUrl)
-                    .addHeader("Authorization", Credentials.basic(username, password))
-                    .get()
-                    .build()
-                val getResponse = client.newCall(getRequest).execute()
-                val content = getResponse.body?.string() ?: ""
-                val events = DavParser.parseIcsEvents(content)
-                traceBuilder.appendLine("  └ GET Fallback status HTTP ${getResponse.code}, parsed ${events.size} event(s)")
-                ParsedCalendarFetchResult(events, null)
+                traceBuilder.appendLine("  └ REPORT parsed ${events.size} event(s)")
+                if (events.isNotEmpty()) {
+                    return@withContext ParsedCalendarFetchResult(events, null)
+                }
             }
+        } catch (e: Exception) {
+            traceBuilder.appendLine("  └ REPORT request error: ${e.message}")
+        }
+
+        // 2. Try PROPFIND Depth 1 asking for calendar-data
+        traceBuilder.appendLine("  └ Trying PROPFIND Depth 1 fallback on: $calendarUrl")
+        val propfindBody = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+               <d:prop>
+                  <d:getetag/>
+                  <c:calendar-data/>
+               </d:prop>
+            </d:propfind>
+        """.trimIndent()
+
+        val pfRequest = Request.Builder()
+            .url(calendarUrl)
+            .addHeader("Authorization", Credentials.basic(username, password))
+            .addHeader("User-Agent", "ownCloud-Sync-Android/1.0")
+            .addHeader("Depth", "1")
+            .method("PROPFIND", propfindBody.toRequestBody(xmlMediaType))
+            .build()
+
+        try {
+            val response = client.newCall(pfRequest).execute()
+            traceBuilder.appendLine("  └ PROPFIND status HTTP ${response.code} (${response.message})")
+
+            if (response.isSuccessful || response.code == 207) {
+                val xml = response.body?.string() ?: ""
+                val events = DavParser.parseIcsEvents(xml)
+                traceBuilder.appendLine("  └ PROPFIND parsed ${events.size} event(s)")
+                if (events.isNotEmpty()) {
+                    return@withContext ParsedCalendarFetchResult(events, null)
+                }
+
+                val icsHrefs = DavParser.parseIcsHrefs(xml, calendarUrl)
+                if (icsHrefs.isNotEmpty()) {
+                    traceBuilder.appendLine("  └ Found ${icsHrefs.size} .ics file(s), fetching individually...")
+                    val fetchedEvents = mutableListOf<ParsedIcsEvent>()
+                    for (href in icsHrefs.take(100)) {
+                        try {
+                            val getReq = Request.Builder()
+                                .url(href)
+                                .addHeader("Authorization", Credentials.basic(username, password))
+                                .addHeader("User-Agent", "ownCloud-Sync-Android/1.0")
+                                .get()
+                                .build()
+                            val getResp = client.newCall(getReq).execute()
+                            if (getResp.isSuccessful) {
+                                val icsText = getResp.body?.string() ?: ""
+                                val parsed = DavParser.parseIcsEvents(icsText)
+                                fetchedEvents.addAll(parsed)
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    if (fetchedEvents.isNotEmpty()) {
+                        traceBuilder.appendLine("  └ Fetched ${fetchedEvents.size} event(s) via GET")
+                        return@withContext ParsedCalendarFetchResult(fetchedEvents, null)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            traceBuilder.appendLine("  └ PROPFIND request error: ${e.message}")
+        }
+
+        // 3. GET Fallback
+        traceBuilder.appendLine("  └ Trying GET fallback on: $calendarUrl")
+        try {
+            val getRequest = Request.Builder()
+                .url(calendarUrl)
+                .addHeader("Authorization", Credentials.basic(username, password))
+                .addHeader("User-Agent", "ownCloud-Sync-Android/1.0")
+                .get()
+                .build()
+            val response = client.newCall(getRequest).execute()
+            val content = response.body?.string() ?: ""
+            val events = DavParser.parseIcsEvents(content)
+            traceBuilder.appendLine("  └ GET Fallback status HTTP ${response.code}, parsed ${events.size} event(s)")
+            ParsedCalendarFetchResult(events, null)
         } catch (e: Exception) {
             traceBuilder.appendLine("  └ Error fetching calendar events: ${e.message}")
             ParsedCalendarFetchResult(emptyList(), e.message)
@@ -365,6 +436,7 @@ class DavClient {
     ): ParsedContactFetchResult = withContext(Dispatchers.IO) {
         traceBuilder.appendLine("➜ Fetching address book contacts from: $addressBookUrl")
 
+        // 1. Try REPORT addressbook-query
         val reportBody = """
             <?xml version="1.0" encoding="utf-8"?>
             <card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
@@ -378,31 +450,104 @@ class DavClient {
         val request = Request.Builder()
             .url(addressBookUrl)
             .addHeader("Authorization", Credentials.basic(username, password))
+            .addHeader("User-Agent", "ownCloud-Sync-Android/1.0")
             .addHeader("Depth", "1")
             .method("REPORT", reportBody.toRequestBody(xmlMediaType))
             .build()
 
         try {
             val response = client.newCall(request).execute()
-            traceBuilder.appendLine("  └ REPORT status HTTP ${response.code}")
+            traceBuilder.appendLine("  └ REPORT status HTTP ${response.code} (${response.message})")
 
             if (response.isSuccessful || response.code == 207) {
                 val xml = response.body?.string() ?: ""
                 val contacts = DavParser.parseVCards(xml)
-                traceBuilder.appendLine("  └ Parsed ${contacts.size} contact(s) from $addressBookUrl")
-                ParsedContactFetchResult(contacts, null)
-            } else {
-                val getRequest = Request.Builder()
-                    .url(addressBookUrl)
-                    .addHeader("Authorization", Credentials.basic(username, password))
-                    .get()
-                    .build()
-                val getResponse = client.newCall(getRequest).execute()
-                val content = getResponse.body?.string() ?: ""
-                val contacts = DavParser.parseVCards(content)
-                traceBuilder.appendLine("  └ GET Fallback status HTTP ${getResponse.code}, parsed ${contacts.size} contact(s)")
-                ParsedContactFetchResult(contacts, null)
+                traceBuilder.appendLine("  └ REPORT parsed ${contacts.size} contact(s)")
+                if (contacts.isNotEmpty()) {
+                    return@withContext ParsedContactFetchResult(contacts, null)
+                }
             }
+        } catch (e: Exception) {
+            traceBuilder.appendLine("  └ REPORT request error: ${e.message}")
+        }
+
+        // 2. Try PROPFIND Depth 1 asking for address-data
+        traceBuilder.appendLine("  └ Trying PROPFIND Depth 1 fallback on: $addressBookUrl")
+        val propfindBody = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <d:propfind xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+               <d:prop>
+                  <d:getetag/>
+                  <d:getcontenttype/>
+                  <card:address-data/>
+               </d:prop>
+            </d:propfind>
+        """.trimIndent()
+
+        val pfRequest = Request.Builder()
+            .url(addressBookUrl)
+            .addHeader("Authorization", Credentials.basic(username, password))
+            .addHeader("User-Agent", "ownCloud-Sync-Android/1.0")
+            .addHeader("Depth", "1")
+            .method("PROPFIND", propfindBody.toRequestBody(xmlMediaType))
+            .build()
+
+        try {
+            val response = client.newCall(pfRequest).execute()
+            traceBuilder.appendLine("  └ PROPFIND status HTTP ${response.code} (${response.message})")
+
+            if (response.isSuccessful || response.code == 207) {
+                val xml = response.body?.string() ?: ""
+                val contacts = DavParser.parseVCards(xml)
+                traceBuilder.appendLine("  └ PROPFIND parsed ${contacts.size} contact(s)")
+                if (contacts.isNotEmpty()) {
+                    return@withContext ParsedContactFetchResult(contacts, null)
+                }
+
+                val vcfHrefs = DavParser.parseVcfHrefs(xml, addressBookUrl)
+                if (vcfHrefs.isNotEmpty()) {
+                    traceBuilder.appendLine("  └ Found ${vcfHrefs.size} .vcf file(s), fetching individually...")
+                    val fetchedContacts = mutableListOf<ParsedVCardContact>()
+                    for (href in vcfHrefs.take(100)) {
+                        try {
+                            val getReq = Request.Builder()
+                                .url(href)
+                                .addHeader("Authorization", Credentials.basic(username, password))
+                                .addHeader("User-Agent", "ownCloud-Sync-Android/1.0")
+                                .get()
+                                .build()
+                            val getResp = client.newCall(getReq).execute()
+                            if (getResp.isSuccessful) {
+                                val vcfText = getResp.body?.string() ?: ""
+                                val parsed = DavParser.parseVCards(vcfText)
+                                fetchedContacts.addAll(parsed)
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    if (fetchedContacts.isNotEmpty()) {
+                        traceBuilder.appendLine("  └ Fetched ${fetchedContacts.size} contact(s) via GET")
+                        return@withContext ParsedContactFetchResult(fetchedContacts, null)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            traceBuilder.appendLine("  └ PROPFIND request error: ${e.message}")
+        }
+
+        // 3. GET Fallback
+        traceBuilder.appendLine("  └ Trying GET fallback on: $addressBookUrl")
+        try {
+            val getRequest = Request.Builder()
+                .url(addressBookUrl)
+                .addHeader("Authorization", Credentials.basic(username, password))
+                .addHeader("User-Agent", "ownCloud-Sync-Android/1.0")
+                .get()
+                .build()
+            val response = client.newCall(getRequest).execute()
+            val content = response.body?.string() ?: ""
+            val contacts = DavParser.parseVCards(content)
+            traceBuilder.appendLine("  └ GET Fallback status HTTP ${response.code}, parsed ${contacts.size} contact(s)")
+            ParsedContactFetchResult(contacts, null)
         } catch (e: Exception) {
             traceBuilder.appendLine("  └ Error fetching contacts: ${e.message}")
             ParsedContactFetchResult(emptyList(), e.message)

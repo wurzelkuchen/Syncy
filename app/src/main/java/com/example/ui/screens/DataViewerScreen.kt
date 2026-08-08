@@ -132,6 +132,42 @@ fun DataViewerScreen(
                     .padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = OwnCloudBlue.copy(alpha = 0.08f))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CalendarMonth,
+                                contentDescription = null,
+                                tint = OwnCloudBlue,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = "System Calendar Integration",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    color = OwnCloudBlue
+                                )
+                                Text(
+                                    text = "Events synced here are saved locally. To see them in Google Calendar or Samsung Calendar, tap 'Sync Now' on Dashboard. CalDAV endpoints are dynamically discovered.",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                                )
+                            }
+                        }
+                    }
+                }
+
                 if (calendars.isNotEmpty()) {
                     item {
                         Text(

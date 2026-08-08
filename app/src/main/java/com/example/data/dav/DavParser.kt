@@ -280,14 +280,41 @@ object DavParser {
     }
 
     /**
-     * Parses iCalendar (.ics) format string into event objects.
+     * Parses iCalendar (.ics) format string or XML containing VEVENT blocks into event objects.
      */
     fun parseIcsEvents(icsContent: String): List<ParsedIcsEvent> {
         val events = mutableListOf<ParsedIcsEvent>()
         if (icsContent.isBlank()) return events
 
-        val lines = icsContent.lines()
-        var inEvent = false
+        val unescapedContent = unescapeXmlEntities(icsContent)
+        val uppercase = unescapedContent.uppercase(Locale.ROOT)
+        var searchIndex = 0
+
+        while (searchIndex < unescapedContent.length) {
+            val startIndex = uppercase.indexOf("BEGIN:VEVENT", searchIndex)
+            if (startIndex == -1) break
+
+            val endIndex = uppercase.indexOf("END:VEVENT", startIndex)
+            val block = if (endIndex == -1) {
+                unescapedContent.substring(startIndex)
+            } else {
+                unescapedContent.substring(startIndex, endIndex + "END:VEVENT".length)
+            }
+
+            val event = parseSingleIcsEvent(block)
+            if (event != null) {
+                events.add(event)
+            }
+
+            if (endIndex == -1) break
+            searchIndex = endIndex + "END:VEVENT".length
+        }
+
+        return events
+    }
+
+    private fun parseSingleIcsEvent(block: String): ParsedIcsEvent? {
+        val lines = block.lines()
         var uid = ""
         var summary = ""
         var location = ""
@@ -296,51 +323,69 @@ object DavParser {
         var dtEnd: Long = System.currentTimeMillis() + 3600000
 
         for (rawLine in lines) {
-            val line = rawLine.trim()
-            if (line.equals("BEGIN:VEVENT", ignoreCase = true)) {
-                inEvent = true
-                uid = ""
-                summary = ""
-                location = ""
-                description = ""
-                dtStart = System.currentTimeMillis()
-                dtEnd = System.currentTimeMillis() + 3600000
-            } else if (line.equals("END:VEVENT", ignoreCase = true)) {
-                if (inEvent) {
-                    if (uid.isEmpty()) uid = "uid_" + System.currentTimeMillis() + "_" + (0..999).random()
-                    if (summary.isEmpty()) summary = "Untitled Event"
-                    events.add(ParsedIcsEvent(uid, summary, dtStart, dtEnd, location, description))
-                }
-                inEvent = false
-            } else if (inEvent) {
-                val parts = line.split(":", limit = 2)
-                if (parts.size == 2) {
-                    val key = parts[0].uppercase(Locale.ROOT)
-                    val value = unescapeIcsValue(parts[1])
+            val cleanLine = rawLine.replace(Regex("<[^>]+>"), "").trim()
+            if (cleanLine.isBlank() || cleanLine.startsWith("BEGIN:VEVENT", ignoreCase = true) || cleanLine.startsWith("END:VEVENT", ignoreCase = true)) {
+                continue
+            }
 
-                    when {
-                        key.startsWith("UID") -> uid = value
-                        key.startsWith("SUMMARY") -> summary = value
-                        key.startsWith("LOCATION") -> location = value
-                        key.startsWith("DESCRIPTION") -> description = value
-                        key.startsWith("DTSTART") -> dtStart = parseIcsDateTime(value)
-                        key.startsWith("DTEND") -> dtEnd = parseIcsDateTime(value)
-                    }
+            val parts = cleanLine.split(":", limit = 2)
+            if (parts.size == 2) {
+                val key = parts[0].uppercase(Locale.ROOT)
+                val value = unescapeIcsValue(parts[1])
+
+                when {
+                    key.startsWith("UID") -> uid = value
+                    key.startsWith("SUMMARY") -> summary = value
+                    key.startsWith("LOCATION") -> location = value
+                    key.startsWith("DESCRIPTION") -> description = value
+                    key.startsWith("DTSTART") -> dtStart = parseIcsDateTime(value)
+                    key.startsWith("DTEND") -> dtEnd = parseIcsDateTime(value)
                 }
             }
         }
-        return events
+
+        if (uid.isEmpty()) uid = "uid_" + System.currentTimeMillis() + "_" + (0..999).random()
+        if (summary.isEmpty()) summary = "Untitled Event"
+
+        return ParsedIcsEvent(uid, summary, dtStart, dtEnd, location, description)
     }
 
     /**
-     * Parses vCard (.vcf) format string into contact objects.
+     * Parses vCard (.vcf) format string or XML containing VCARD blocks into contact objects.
      */
     fun parseVCards(vCardContent: String): List<ParsedVCardContact> {
         val contacts = mutableListOf<ParsedVCardContact>()
         if (vCardContent.isBlank()) return contacts
 
-        val lines = vCardContent.lines()
-        var inVCard = false
+        val unescapedContent = unescapeXmlEntities(vCardContent)
+        val uppercase = unescapedContent.uppercase(Locale.ROOT)
+        var searchIndex = 0
+
+        while (searchIndex < unescapedContent.length) {
+            val startIndex = uppercase.indexOf("BEGIN:VCARD", searchIndex)
+            if (startIndex == -1) break
+
+            val endIndex = uppercase.indexOf("END:VCARD", startIndex)
+            val block = if (endIndex == -1) {
+                unescapedContent.substring(startIndex)
+            } else {
+                unescapedContent.substring(startIndex, endIndex + "END:VCARD".length)
+            }
+
+            val contact = parseSingleVCard(block)
+            if (contact != null) {
+                contacts.add(contact)
+            }
+
+            if (endIndex == -1) break
+            searchIndex = endIndex + "END:VCARD".length
+        }
+
+        return contacts
+    }
+
+    private fun parseSingleVCard(block: String): ParsedVCardContact? {
+        val lines = block.lines()
         var uid = ""
         var fn = ""
         var tel = ""
@@ -349,44 +394,81 @@ object DavParser {
         var note = ""
 
         for (rawLine in lines) {
-            val line = rawLine.trim()
-            if (line.equals("BEGIN:VCARD", ignoreCase = true)) {
-                inVCard = true
-                uid = ""
-                fn = ""
-                tel = ""
-                email = ""
-                org = ""
-                note = ""
-            } else if (line.equals("END:VCARD", ignoreCase = true)) {
-                if (inVCard) {
-                    if (uid.isEmpty()) uid = "card_" + System.currentTimeMillis() + "_" + (0..999).random()
-                    if (fn.isEmpty()) fn = "Unnamed Contact"
-                    contacts.add(ParsedVCardContact(uid, fn, tel, email, org, note))
-                }
-                inVCard = false
-            } else if (inVCard) {
-                val parts = line.split(":", limit = 2)
-                if (parts.size == 2) {
-                    val key = parts[0].uppercase(Locale.ROOT)
-                    val value = parts[1].trim()
+            val cleanLine = rawLine.replace(Regex("<[^>]+>"), "").trim()
+            if (cleanLine.isBlank() || cleanLine.startsWith("BEGIN:VCARD", ignoreCase = true) || cleanLine.startsWith("END:VCARD", ignoreCase = true)) {
+                continue
+            }
 
-                    when {
-                        key.startsWith("UID") -> uid = value
-                        key.startsWith("FN") -> fn = value
-                        key.startsWith("TEL") -> {
-                            if (tel.isEmpty()) tel = value else tel += ", $value"
-                        }
-                        key.startsWith("EMAIL") -> {
-                            if (email.isEmpty()) email = value else email += ", $value"
-                        }
-                        key.startsWith("ORG") -> org = value.replace(";", " ")
-                        key.startsWith("NOTE") -> note = value
+            val parts = cleanLine.split(":", limit = 2)
+            if (parts.size == 2) {
+                val key = parts[0].uppercase(Locale.ROOT)
+                val value = parts[1].trim()
+
+                when {
+                    key.startsWith("UID") -> uid = value
+                    key.startsWith("FN") -> fn = unescapeXmlEntities(value)
+                    key.startsWith("N") && fn.isEmpty() -> {
+                        val nameParts = value.split(";")
+                        val lastName = nameParts.getOrNull(0)?.trim() ?: ""
+                        val firstName = nameParts.getOrNull(1)?.trim() ?: ""
+                        fn = unescapeXmlEntities("$firstName $lastName".trim())
                     }
+                    key.startsWith("TEL") -> {
+                        val cleanTel = unescapeXmlEntities(value)
+                        if (tel.isEmpty()) tel = cleanTel else tel += ", $cleanTel"
+                    }
+                    key.startsWith("EMAIL") -> {
+                        val cleanEmail = unescapeXmlEntities(value)
+                        if (email.isEmpty()) email = cleanEmail else email += ", $cleanEmail"
+                    }
+                    key.startsWith("ORG") -> org = unescapeXmlEntities(value.replace(";", " ").trim())
+                    key.startsWith("NOTE") -> note = unescapeXmlEntities(value)
                 }
             }
         }
-        return contacts
+
+        if (uid.isEmpty()) uid = "card_" + System.currentTimeMillis() + "_" + (0..999).random()
+        if (fn.isEmpty()) fn = "Unnamed Contact"
+
+        return ParsedVCardContact(uid, fn, tel, email, org, note)
+    }
+
+    fun parseVcfHrefs(xml: String, baseUrl: String): List<String> {
+        val hrefs = mutableListOf<String>()
+        if (xml.isBlank()) return hrefs
+        val matches = Regex("(?i)<(?:\\w+:)?href>([^<]+)").findAll(xml)
+        for (match in matches) {
+            val href = match.groupValues[1].trim()
+            if (href.endsWith(".vcf", ignoreCase = true)) {
+                val fullUrl = resolveUrl(baseUrl, href)
+                if (!hrefs.contains(fullUrl)) hrefs.add(fullUrl)
+            }
+        }
+        return hrefs
+    }
+
+    fun parseIcsHrefs(xml: String, baseUrl: String): List<String> {
+        val hrefs = mutableListOf<String>()
+        if (xml.isBlank()) return hrefs
+        val matches = Regex("(?i)<(?:\\w+:)?href>([^<]+)").findAll(xml)
+        for (match in matches) {
+            val href = match.groupValues[1].trim()
+            if (href.endsWith(".ics", ignoreCase = true)) {
+                val fullUrl = resolveUrl(baseUrl, href)
+                if (!hrefs.contains(fullUrl)) hrefs.add(fullUrl)
+            }
+        }
+        return hrefs
+    }
+
+    private fun unescapeXmlEntities(text: String): String {
+        return text.replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&")
+            .replace("&#13;", "")
+            .replace("&#10;", "\n")
     }
 
     private fun parseIcsDateTime(value: String): Long {

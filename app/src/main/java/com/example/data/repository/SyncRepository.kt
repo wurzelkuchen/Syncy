@@ -11,6 +11,8 @@ import com.example.data.model.CalendarEventEntity
 import com.example.data.model.ContactEntity
 import com.example.data.model.SyncLogEntity
 import com.example.data.security.SecureStorage
+import com.example.data.system.SystemCalendarSync
+import com.example.data.system.SystemContactsSync
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -20,7 +22,8 @@ import java.util.Locale
 
 class SyncRepository(context: Context) {
 
-    private val db = AppDatabase.getDatabase(context)
+    private val appContext = context.applicationContext
+    private val db = AppDatabase.getDatabase(appContext)
     private val accountDao = db.accountDao()
     private val calendarDao = db.calendarDao()
     private val addressBookDao = db.addressBookDao()
@@ -186,17 +189,23 @@ class SyncRepository(context: Context) {
             }
             totalEventsParsed += eventEntities.size
             calendarEventDao.replaceCalendarEvents(cal.url, eventEntities)
-            calendarDao.insertCalendars(
-                listOf(
-                    CalendarEntity(
-                        id = cal.url,
-                        displayName = cal.displayName,
-                        color = cal.color,
-                        url = cal.url,
-                        eventCount = eventEntities.size,
-                        lastSyncTimestamp = System.currentTimeMillis()
-                    )
-                )
+            val calEntity = CalendarEntity(
+                id = cal.url,
+                displayName = cal.displayName,
+                color = cal.color,
+                url = cal.url,
+                eventCount = eventEntities.size,
+                lastSyncTimestamp = System.currentTimeMillis()
+            )
+            calendarDao.insertCalendars(listOf(calEntity))
+
+            // Sync to Android System Calendar Provider
+            SystemCalendarSync.syncCalendarToSystem(
+                context = appContext,
+                accountUsername = account.username,
+                calendar = calEntity,
+                events = eventEntities,
+                traceBuilder = trace
             )
         }
 
@@ -221,16 +230,22 @@ class SyncRepository(context: Context) {
             }
             totalContactsParsed += contactEntities.size
             contactDao.replaceAddressBookContacts(book.url, contactEntities)
-            addressBookDao.insertAddressBooks(
-                listOf(
-                    AddressBookEntity(
-                        id = book.url,
-                        displayName = book.displayName,
-                        url = book.url,
-                        contactCount = contactEntities.size,
-                        lastSyncTimestamp = System.currentTimeMillis()
-                    )
-                )
+            val bookEntity = AddressBookEntity(
+                id = book.url,
+                displayName = book.displayName,
+                url = book.url,
+                contactCount = contactEntities.size,
+                lastSyncTimestamp = System.currentTimeMillis()
+            )
+            addressBookDao.insertAddressBooks(listOf(bookEntity))
+
+            // Sync to Android System Contacts Provider
+            SystemContactsSync.syncContactsToSystem(
+                context = appContext,
+                accountUsername = account.username,
+                addressBook = bookEntity,
+                contacts = contactEntities,
+                traceBuilder = trace
             )
         }
 

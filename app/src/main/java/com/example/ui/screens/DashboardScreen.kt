@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
@@ -33,6 +35,7 @@ import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Contacts
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.PermDeviceInformation
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
@@ -49,18 +52,24 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.AccountEntity
 import com.example.data.model.SyncLogEntity
+import com.example.data.system.SystemCalendarSync
+import com.example.data.system.SystemContactsSync
 import com.example.ui.theme.OwnCloudBlue
 import com.example.ui.theme.OwnCloudBlueDark
 import com.example.ui.theme.StatusErrorRed
@@ -86,6 +95,17 @@ fun DashboardScreen(
 ) {
     val scrollState = rememberScrollState()
     val dateFmt = SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault())
+
+    val context = LocalContext.current
+    var hasCalPerms by remember { mutableStateOf(SystemCalendarSync.hasCalendarPermissions(context)) }
+    var hasContactPerms by remember { mutableStateOf(SystemContactsSync.hasContactsPermissions(context)) }
+
+    val permLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        hasCalPerms = SystemCalendarSync.hasCalendarPermissions(context)
+        hasContactPerms = SystemContactsSync.hasContactsPermissions(context)
+    }
 
     Column(
         modifier = Modifier
@@ -289,6 +309,149 @@ fun DashboardScreen(
                             fontWeight = FontWeight.Bold,
                             fontSize = 16.sp
                         )
+                    }
+                }
+            }
+        }
+
+        // System Apps Access Card (Calendar & Contacts Permissions)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            )
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.PermDeviceInformation,
+                            contentDescription = "System Apps",
+                            tint = OwnCloudBlue,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Availability in Other Apps",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+
+                    val allGranted = hasCalPerms && hasContactPerms
+                    val statusColor = if (allGranted) StatusSuccessGreen else StatusWarningAmber
+                    val statusText = if (allGranted) "Active" else "Permission Required"
+
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = statusColor.copy(alpha = 0.15f),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, statusColor)
+                    ) {
+                        Text(
+                            text = statusText,
+                            color = statusColor,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = "To make your calendars and contacts visible in Google Calendar, Samsung Calendar, WhatsApp, and System Contacts, grant Android Calendar & Contacts permissions below.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // Calendar Permission status badge
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (hasCalPerms) StatusSuccessGreen.copy(alpha = 0.1f) else MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CalendarMonth,
+                                contentDescription = null,
+                                tint = if (hasCalPerms) StatusSuccessGreen else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Column {
+                                Text("Calendar", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Text(
+                                    if (hasCalPerms) "Granted" else "Not Granted",
+                                    fontSize = 10.sp,
+                                    color = if (hasCalPerms) StatusSuccessGreen else StatusErrorRed
+                                )
+                            }
+                        }
+                    }
+
+                    // Contacts Permission status badge
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (hasContactPerms) StatusSuccessGreen.copy(alpha = 0.1f) else MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Contacts,
+                                contentDescription = null,
+                                tint = if (hasContactPerms) StatusSuccessGreen else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Column {
+                                Text("Contacts", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Text(
+                                    if (hasContactPerms) "Granted" else "Not Granted",
+                                    fontSize = 10.sp,
+                                    color = if (hasContactPerms) StatusSuccessGreen else StatusErrorRed
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (!hasCalPerms || !hasContactPerms) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
+                        onClick = {
+                            permLauncher.launch(
+                                arrayOf(
+                                    android.Manifest.permission.READ_CALENDAR,
+                                    android.Manifest.permission.WRITE_CALENDAR,
+                                    android.Manifest.permission.READ_CONTACTS,
+                                    android.Manifest.permission.WRITE_CONTACTS
+                                )
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = OwnCloudBlue)
+                    ) {
+                        Text("Grant System Calendar & Contacts Permissions")
                     }
                 }
             }
