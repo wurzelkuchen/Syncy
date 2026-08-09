@@ -23,6 +23,21 @@ object SystemContactsSync {
         return read && write
     }
 
+    fun removeSystemContacts(context: Context, accountUsername: String): Boolean {
+        if (!hasContactsPermissions(context)) return false
+        val accountName = accountUsername.ifBlank { "ownCloud" }
+        return try {
+            context.contentResolver.delete(
+                RawContacts.CONTENT_URI,
+                "${RawContacts.SYNC1} = ? OR ${RawContacts.ACCOUNT_NAME} = ?",
+                arrayOf(accountName, accountName)
+            )
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     fun syncContactsToSystem(
         context: Context,
         accountUsername: String,
@@ -38,16 +53,18 @@ object SystemContactsSync {
         val contentResolver = context.contentResolver
         val accountName = accountUsername.ifBlank { "ownCloud" }
 
-        return try {
-            // Delete old raw contacts for this account & address book source
-            val rawContactsUri = RawContacts.CONTENT_URI.buildUpon()
-                .appendQueryParameter(ContactsContract.CALLER_IS_SYNCADAPTER, "true")
-                .build()
+        if (!addressBook.syncEnabled) {
+            removeSystemContacts(context, accountUsername)
+            traceBuilder?.appendLine("  └ [SystemContacts] Address book '${addressBook.effectiveName}' sync is disabled. Cleared system contacts.")
+            return true
+        }
 
+        return try {
+            // Delete old raw contacts for this account
             val deleted = contentResolver.delete(
-                rawContactsUri,
-                "${RawContacts.ACCOUNT_NAME} = ?",
-                arrayOf(accountName)
+                RawContacts.CONTENT_URI,
+                "${RawContacts.SYNC1} = ? OR ${RawContacts.ACCOUNT_NAME} = ?",
+                arrayOf(accountName, accountName)
             )
             traceBuilder?.appendLine("  └ [SystemContacts] Cleared $deleted old raw contact(s) for account '$accountName'")
 
@@ -61,21 +78,30 @@ object SystemContactsSync {
                 for (contact in batch) {
                     val rawContactIndex = ops.size
 
+                    // Create raw contact attached as device local contact with SYNC1 tag
                     ops.add(
-                        ContentProviderOperation.newInsert(rawContactsUri)
-                            .withValue(RawContacts.ACCOUNT_NAME, accountName)
+                        ContentProviderOperation.newInsert(RawContacts.CONTENT_URI)
+                            .withValue(RawContacts.ACCOUNT_NAME, null)
                             .withValue(RawContacts.ACCOUNT_TYPE, null)
+                            .withValue(RawContacts.SYNC1, accountName)
                             .withValue(RawContacts.SOURCE_ID, contact.uid)
                             .build()
                     )
 
-                    // Display Name
-                    if (contact.fullName.isNotBlank()) {
+                    // Structured Name (Display Name + Given & Family name for Android indexing)
+                    val name = contact.fullName.trim()
+                    if (name.isNotBlank()) {
+                        val nameParts = name.split("\\s+".toRegex(), limit = 2)
+                        val givenName = nameParts.getOrNull(0) ?: ""
+                        val familyName = nameParts.getOrNull(1) ?: ""
+
                         ops.add(
                             ContentProviderOperation.newInsert(Data.CONTENT_URI)
                                 .withValueBackReference(Data.RAW_CONTACT_ID, rawContactIndex)
                                 .withValue(Data.MIMETYPE, StructuredName.CONTENT_ITEM_TYPE)
-                                .withValue(StructuredName.DISPLAY_NAME, contact.fullName)
+                                .withValue(StructuredName.DISPLAY_NAME, name)
+                                .withValue(StructuredName.GIVEN_NAME, givenName)
+                                .withValue(StructuredName.FAMILY_NAME, familyName)
                                 .build()
                         )
                     }
@@ -134,7 +160,11 @@ object SystemContactsSync {
                 }
             }
 
-            traceBuilder?.appendLine("  └ [SystemContacts] Successfully exported $exportedCount contact(s) to Android System Contacts Provider!")
+            try {
+                contentResolver.notifyChange(ContactsContract.Contacts.CONTENT_URI, null)
+            } catch (_: Exception) {}
+
+            traceBuilder?.appendLine("  └ [SystemContacts] Successfully exported $exportedCount contact(s) to Device Contacts Provider!")
             true
         } catch (e: Exception) {
             traceBuilder?.appendLine("  └ [SystemContacts] Error syncing contacts to system: ${e.message}")

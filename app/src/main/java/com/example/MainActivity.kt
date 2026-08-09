@@ -38,13 +38,29 @@ import com.example.ui.theme.OwnCloudBlue
 import com.example.ui.theme.OwnCloudSyncTheme
 import com.example.ui.viewmodel.MainViewModel
 
+import androidx.activity.result.contract.ActivityResultContracts
+import android.Manifest
+
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
 
+    private val requestPermissionsLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ -> }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        requestPermissionsLauncher.launch(
+            arrayOf(
+                Manifest.permission.READ_CALENDAR,
+                Manifest.permission.WRITE_CALENDAR,
+                Manifest.permission.READ_CONTACTS,
+                Manifest.permission.WRITE_CONTACTS
+            )
+        )
 
         setContent {
             OwnCloudSyncTheme {
@@ -131,7 +147,11 @@ class MainActivity : ComponentActivity() {
                                 events = events,
                                 contacts = contacts,
                                 searchQuery = searchQuery,
-                                onSearchQueryChange = { viewModel.setSearchQuery(it) }
+                                onSearchQueryChange = { viewModel.setSearchQuery(it) },
+                                onToggleCalendarSync = { id, enabled -> viewModel.toggleCalendarSync(id, enabled) },
+                                onSetCalendarCustomName = { id, name -> viewModel.setCalendarCustomName(id, name) },
+                                onToggleAddressBookSync = { id, enabled -> viewModel.toggleAddressBookSync(id, enabled) },
+                                onSetAddressBookCustomName = { id, name -> viewModel.setAddressBookCustomName(id, name) }
                             )
 
                             2 -> LogsScreen(

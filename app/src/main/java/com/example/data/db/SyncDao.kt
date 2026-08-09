@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import androidx.room.Update
 import com.example.data.model.AccountEntity
 import com.example.data.model.AddressBookEntity
 import com.example.data.model.CalendarEntity
@@ -39,6 +40,15 @@ interface CalendarDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertCalendars(calendars: List<CalendarEntity>)
 
+    @Update
+    suspend fun updateCalendar(calendar: CalendarEntity)
+
+    @Query("UPDATE calendars SET syncEnabled = :enabled WHERE id = :id")
+    suspend fun setCalendarSyncEnabled(id: String, enabled: Boolean)
+
+    @Query("UPDATE calendars SET customName = :customName WHERE id = :id")
+    suspend fun setCalendarCustomName(id: String, customName: String)
+
     @Query("DELETE FROM calendars")
     suspend fun clearCalendars()
 }
@@ -53,6 +63,15 @@ interface AddressBookDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAddressBooks(addressBooks: List<AddressBookEntity>)
+
+    @Update
+    suspend fun updateAddressBook(addressBook: AddressBookEntity)
+
+    @Query("UPDATE address_books SET syncEnabled = :enabled WHERE id = :id")
+    suspend fun setAddressBookSyncEnabled(id: String, enabled: Boolean)
+
+    @Query("UPDATE address_books SET customName = :customName WHERE id = :id")
+    suspend fun setAddressBookCustomName(id: String, customName: String)
 
     @Query("DELETE FROM address_books")
     suspend fun clearAddressBooks()

@@ -33,18 +33,24 @@ object SystemCalendarSync {
         }
 
         val contentResolver = context.contentResolver
+        val accountName = accountUsername.ifBlank { "ownCloud" }
 
         return try {
             val systemCalId = getOrCreateSystemCalendar(context, accountUsername, calendar)
             if (systemCalId <= 0) {
-                traceBuilder?.appendLine("  └ [SystemCalendar] Could not create or find system calendar ID for ${calendar.displayName}")
+                traceBuilder?.appendLine("  └ [SystemCalendar] Could not create or find system calendar ID for ${calendar.effectiveName}")
                 return false
             }
 
+            val eventsUri = CalendarContract.Events.CONTENT_URI.buildUpon()
+                .appendQueryParameter(CalendarContract.CALLER_IS_SYNCADAPTER, "true")
+                .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_NAME, accountName)
+                .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_TYPE, CalendarContract.ACCOUNT_TYPE_LOCAL)
+                .build()
+
             // Remove existing system events for this calendar to ensure clean state
-            val deleteUri = CalendarContract.Events.CONTENT_URI
             val deletedCount = contentResolver.delete(
-                deleteUri,
+                eventsUri,
                 "${CalendarContract.Events.CALENDAR_ID} = ?",
                 arrayOf(systemCalId.toString())
             )
@@ -63,21 +69,41 @@ object SystemCalendarSync {
                     val end = if (event.endTime > event.startTime) event.endTime else event.startTime + 3600000
                     put(CalendarContract.Events.DTEND, end)
                     put(CalendarContract.Events.EVENT_TIMEZONE, timeZone)
+                    put(CalendarContract.Events.STATUS, CalendarContract.Events.STATUS_CONFIRMED)
+                    put(CalendarContract.Events.AVAILABILITY, CalendarContract.Events.AVAILABILITY_BUSY)
+                    put(CalendarContract.Events.ORGANIZER, accountName)
                     put(CalendarContract.Events._SYNC_ID, event.uid)
                 }
 
-                val uri = contentResolver.insert(CalendarContract.Events.CONTENT_URI, values)
+                val uri = contentResolver.insert(eventsUri, values)
                 if (uri != null) {
                     insertedEvents++
                 }
             }
 
-            traceBuilder?.appendLine("  └ [SystemCalendar] Successfully exported $insertedEvents event(s) to system calendar '${calendar.displayName}'")
+            try {
+                contentResolver.notifyChange(CalendarContract.Events.CONTENT_URI, null)
+            } catch (_: Exception) {}
+
+            traceBuilder?.appendLine("  └ [SystemCalendar] Successfully exported $insertedEvents event(s) to system calendar '${calendar.effectiveName}'")
             true
         } catch (e: Exception) {
             traceBuilder?.appendLine("  └ [SystemCalendar] Error syncing to system calendar: ${e.message}")
             false
         }
+    }
+
+    fun removeSystemCalendar(context: Context, accountUsername: String, calendarUrl: String): Boolean {
+        if (!hasCalendarPermissions(context)) return false
+        val accountName = accountUsername.ifBlank { "ownCloud" }
+        val calendarUri = CalendarContract.Calendars.CONTENT_URI.buildUpon()
+            .appendQueryParameter(CalendarContract.CALLER_IS_SYNCADAPTER, "true")
+            .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_NAME, accountName)
+            .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_TYPE, CalendarContract.ACCOUNT_TYPE_LOCAL)
+            .build()
+        val selection = "(${CalendarContract.Calendars.ACCOUNT_NAME} = ?) AND (${CalendarContract.Calendars.NAME} = ?)"
+        val count = context.contentResolver.delete(calendarUri, selection, arrayOf(accountName, calendarUrl))
+        return count > 0
     }
 
     private fun getOrCreateSystemCalendar(
@@ -87,9 +113,10 @@ object SystemCalendarSync {
     ): Long {
         val contentResolver = context.contentResolver
         val accountName = accountUsername.ifBlank { "ownCloud" }
+        val effectiveName = calendar.effectiveName.ifBlank { "ownCloud Calendar" }
 
         // Query existing calendar
-        val projection = arrayOf(CalendarContract.Calendars._ID, CalendarContract.Calendars.NAME)
+        val projection = arrayOf(CalendarContract.Calendars._ID, CalendarContract.Calendars.NAME, CalendarContract.Calendars.CALENDAR_DISPLAY_NAME)
         val selection = "(${CalendarContract.Calendars.ACCOUNT_NAME} = ?) AND (${CalendarContract.Calendars.NAME} = ?)"
         val selectionArgs = arrayOf(accountName, calendar.url)
 
@@ -101,7 +128,20 @@ object SystemCalendarSync {
 
         contentResolver.query(calendarUri, projection, selection, selectionArgs, null)?.use { cursor ->
             if (cursor.moveToFirst()) {
-                return cursor.getLong(0)
+                val calId = cursor.getLong(0)
+                val currentDisplayName = cursor.getString(2) ?: ""
+                if (currentDisplayName != effectiveName) {
+                    val updateValues = ContentValues().apply {
+                        put(CalendarContract.Calendars.CALENDAR_DISPLAY_NAME, effectiveName)
+                    }
+                    val updateUri = ContentUris.withAppendedId(CalendarContract.Calendars.CONTENT_URI, calId).buildUpon()
+                        .appendQueryParameter(CalendarContract.CALLER_IS_SYNCADAPTER, "true")
+                        .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_NAME, accountName)
+                        .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_TYPE, CalendarContract.ACCOUNT_TYPE_LOCAL)
+                        .build()
+                    contentResolver.update(updateUri, updateValues, null, null)
+                }
+                return calId
             }
         }
 
@@ -116,7 +156,7 @@ object SystemCalendarSync {
             put(CalendarContract.Calendars.ACCOUNT_NAME, accountName)
             put(CalendarContract.Calendars.ACCOUNT_TYPE, CalendarContract.ACCOUNT_TYPE_LOCAL)
             put(CalendarContract.Calendars.NAME, calendar.url)
-            put(CalendarContract.Calendars.CALENDAR_DISPLAY_NAME, calendar.displayName.ifBlank { "ownCloud Calendar" })
+            put(CalendarContract.Calendars.CALENDAR_DISPLAY_NAME, effectiveName)
             put(CalendarContract.Calendars.CALENDAR_COLOR, colorInt)
             put(CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL, CalendarContract.Calendars.CAL_ACCESS_OWNER)
             put(CalendarContract.Calendars.OWNER_ACCOUNT, accountName)

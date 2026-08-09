@@ -22,23 +22,29 @@ data class CalendarEntity(
     @PrimaryKey val id: String, // Calendar URL or unique path
     val accountId: Int = 1,
     val displayName: String,
+    val customName: String = "",
     val color: String = "#0288D1",
     val url: String,
     val syncEnabled: Boolean = true,
     val eventCount: Int = 0,
     val lastSyncTimestamp: Long = 0
-)
+) {
+    val effectiveName: String get() = customName.ifBlank { displayName }
+}
 
 @Entity(tableName = "address_books")
 data class AddressBookEntity(
     @PrimaryKey val id: String, // Address book URL
     val accountId: Int = 1,
     val displayName: String,
+    val customName: String = "",
     val url: String,
     val syncEnabled: Boolean = true,
     val contactCount: Int = 0,
     val lastSyncTimestamp: Long = 0
-)
+) {
+    val effectiveName: String get() = customName.ifBlank { displayName }
+}
 
 @Entity(tableName = "calendar_events")
 data class CalendarEventEntity(

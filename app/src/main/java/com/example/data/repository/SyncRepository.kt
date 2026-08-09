@@ -127,6 +127,10 @@ class SyncRepository(context: Context) {
         var totalEventsParsed = 0
         var totalContactsParsed = 0
 
+        // Read existing settings to preserve user custom names and syncEnabled states
+        val existingCalsMap = calendarDao.getCalendars().associateBy { it.id }
+        val existingBooksMap = addressBookDao.getAddressBooks().associateBy { it.id }
+
         // 1. Discover Calendars
         trace.appendLine("\n--- STEP 1: DISCOVER CALENDARS ---")
         val discoveredCalendars = davClient.discoverCalendars(account.serverUrl, account.username, password, trace)
@@ -137,11 +141,14 @@ class SyncRepository(context: Context) {
             hasWarnings = true
         } else {
             val calEntities = discoveredCalendars.map {
+                val prev = existingCalsMap[it.url]
                 CalendarEntity(
                     id = it.url,
                     displayName = it.displayName,
+                    customName = prev?.customName ?: "",
                     color = it.color,
                     url = it.url,
+                    syncEnabled = prev?.syncEnabled ?: true,
                     lastSyncTimestamp = System.currentTimeMillis()
                 )
             }
@@ -158,10 +165,13 @@ class SyncRepository(context: Context) {
             hasWarnings = true
         } else {
             val bookEntities = discoveredAddressBooks.map {
+                val prev = existingBooksMap[it.url]
                 AddressBookEntity(
                     id = it.url,
                     displayName = it.displayName,
+                    customName = prev?.customName ?: "",
                     url = it.url,
+                    syncEnabled = prev?.syncEnabled ?: true,
                     lastSyncTimestamp = System.currentTimeMillis()
                 )
             }
@@ -170,11 +180,25 @@ class SyncRepository(context: Context) {
 
         // 3. Fetch Events for each discovered Calendar
         trace.appendLine("\n--- STEP 3: SYNC CALENDAR EVENTS ---")
+        val allStoredCalendars = calendarDao.getCalendars().associateBy { it.id }
         for (cal in discoveredCalendars) {
+            val calEntity = allStoredCalendars[cal.url] ?: CalendarEntity(
+                id = cal.url,
+                displayName = cal.displayName,
+                color = cal.color,
+                url = cal.url
+            )
+
+            if (!calEntity.syncEnabled) {
+                trace.appendLine("  └ [Skipped] '${calEntity.effectiveName}' sync is disabled by user.")
+                SystemCalendarSync.removeSystemCalendar(appContext, account.username, cal.url)
+                continue
+            }
+
             val fetchRes = davClient.fetchCalendarEvents(cal.url, account.username, password, trace)
             if (fetchRes.error != null) {
                 hasWarnings = true
-                trace.appendLine("  └ Warning on ${cal.displayName}: ${fetchRes.error}")
+                trace.appendLine("  └ Warning on ${calEntity.effectiveName}: ${fetchRes.error}")
             }
             val eventEntities = fetchRes.events.map {
                 CalendarEventEntity(
@@ -189,21 +213,17 @@ class SyncRepository(context: Context) {
             }
             totalEventsParsed += eventEntities.size
             calendarEventDao.replaceCalendarEvents(cal.url, eventEntities)
-            val calEntity = CalendarEntity(
-                id = cal.url,
-                displayName = cal.displayName,
-                color = cal.color,
-                url = cal.url,
+            val updatedCalEntity = calEntity.copy(
                 eventCount = eventEntities.size,
                 lastSyncTimestamp = System.currentTimeMillis()
             )
-            calendarDao.insertCalendars(listOf(calEntity))
+            calendarDao.insertCalendars(listOf(updatedCalEntity))
 
             // Sync to Android System Calendar Provider
             SystemCalendarSync.syncCalendarToSystem(
                 context = appContext,
                 accountUsername = account.username,
-                calendar = calEntity,
+                calendar = updatedCalEntity,
                 events = eventEntities,
                 traceBuilder = trace
             )
@@ -211,11 +231,24 @@ class SyncRepository(context: Context) {
 
         // 4. Fetch Contacts for each Address Book
         trace.appendLine("\n--- STEP 4: SYNC CONTACTS ---")
+        val allStoredBooks = addressBookDao.getAddressBooks().associateBy { it.id }
         for (book in discoveredAddressBooks) {
+            val bookEntity = allStoredBooks[book.url] ?: AddressBookEntity(
+                id = book.url,
+                displayName = book.displayName,
+                url = book.url
+            )
+
+            if (!bookEntity.syncEnabled) {
+                trace.appendLine("  └ [Skipped] '${bookEntity.effectiveName}' sync is disabled by user.")
+                SystemContactsSync.removeSystemContacts(appContext, account.username)
+                continue
+            }
+
             val fetchRes = davClient.fetchAddressBookContacts(book.url, account.username, password, trace)
             if (fetchRes.error != null) {
                 hasWarnings = true
-                trace.appendLine("  └ Warning on ${book.displayName}: ${fetchRes.error}")
+                trace.appendLine("  └ Warning on ${bookEntity.effectiveName}: ${fetchRes.error}")
             }
             val contactEntities = fetchRes.contacts.map {
                 ContactEntity(
@@ -230,20 +263,17 @@ class SyncRepository(context: Context) {
             }
             totalContactsParsed += contactEntities.size
             contactDao.replaceAddressBookContacts(book.url, contactEntities)
-            val bookEntity = AddressBookEntity(
-                id = book.url,
-                displayName = book.displayName,
-                url = book.url,
+            val updatedBookEntity = bookEntity.copy(
                 contactCount = contactEntities.size,
                 lastSyncTimestamp = System.currentTimeMillis()
             )
-            addressBookDao.insertAddressBooks(listOf(bookEntity))
+            addressBookDao.insertAddressBooks(listOf(updatedBookEntity))
 
             // Sync to Android System Contacts Provider
             SystemContactsSync.syncContactsToSystem(
                 context = appContext,
                 accountUsername = account.username,
-                addressBook = bookEntity,
+                addressBook = updatedBookEntity,
                 contacts = contactEntities,
                 traceBuilder = trace
             )
@@ -290,5 +320,41 @@ class SyncRepository(context: Context) {
         accountDao.saveAccount(updatedAccount)
 
         logEntity
+    }
+
+    suspend fun updateCalendarSyncEnabled(calendarId: String, enabled: Boolean) {
+        calendarDao.setCalendarSyncEnabled(calendarId, enabled)
+        val account = accountDao.getAccount()
+        if (account != null && !enabled) {
+            SystemCalendarSync.removeSystemCalendar(appContext, account.username, calendarId)
+        }
+    }
+
+    suspend fun updateCalendarCustomName(calendarId: String, customName: String) {
+        calendarDao.setCalendarCustomName(calendarId, customName)
+        val account = accountDao.getAccount()
+        val cals = calendarDao.getCalendars()
+        val cal = cals.find { it.id == calendarId }
+        if (account != null && cal != null && cal.syncEnabled) {
+            // Re-sync metadata to system calendar provider
+            SystemCalendarSync.syncCalendarToSystem(
+                context = appContext,
+                accountUsername = account.username,
+                calendar = cal,
+                events = emptyList()
+            )
+        }
+    }
+
+    suspend fun updateAddressBookSyncEnabled(addressBookId: String, enabled: Boolean) {
+        addressBookDao.setAddressBookSyncEnabled(addressBookId, enabled)
+        val account = accountDao.getAccount()
+        if (account != null && !enabled) {
+            SystemContactsSync.removeSystemContacts(appContext, account.username)
+        }
+    }
+
+    suspend fun updateAddressBookCustomName(addressBookId: String, customName: String) {
+        addressBookDao.setAddressBookCustomName(addressBookId, customName)
     }
 }

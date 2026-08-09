@@ -133,6 +133,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun toggleCalendarSync(calendarId: String, enabled: Boolean) {
+        viewModelScope.launch {
+            repository.updateCalendarSyncEnabled(calendarId, enabled)
+        }
+    }
+
+    fun setCalendarCustomName(calendarId: String, customName: String) {
+        viewModelScope.launch {
+            repository.updateCalendarCustomName(calendarId, customName)
+        }
+    }
+
+    fun toggleAddressBookSync(addressBookId: String, enabled: Boolean) {
+        viewModelScope.launch {
+            repository.updateAddressBookSyncEnabled(addressBookId, enabled)
+        }
+    }
+
+    fun setAddressBookCustomName(addressBookId: String, customName: String) {
+        viewModelScope.launch {
+            repository.updateAddressBookCustomName(addressBookId, customName)
+        }
+    }
+
     fun clearAllLogs() {
         viewModelScope.launch {
             repository.clearLogs()

@@ -26,6 +26,11 @@ import androidx.compose.material.icons.filled.Event
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Switch
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -58,6 +63,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+import androidx.compose.runtime.mutableStateOf
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DataViewerScreen(
@@ -66,9 +73,16 @@ fun DataViewerScreen(
     events: List<CalendarEventEntity>,
     contacts: List<ContactEntity>,
     searchQuery: String,
-    onSearchQueryChange: (String) -> Unit
+    onSearchQueryChange: (String) -> Unit,
+    onToggleCalendarSync: (String, Boolean) -> Unit = { _, _ -> },
+    onSetCalendarCustomName: (String, String) -> Unit = { _, _ -> },
+    onToggleAddressBookSync: (String, Boolean) -> Unit = { _, _ -> },
+    onSetAddressBookCustomName: (String, String) -> Unit = { _, _ -> }
 ) {
     var selectedTabIndex by remember { mutableIntStateOf(0) }
+    var editingEntityId by remember { mutableStateOf<String?>(null) }
+    var editingEntityIsCalendar by remember { mutableStateOf(true) }
+    var editingNameText by remember { mutableStateOf("") }
     val timeFmt = SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault())
 
     Column(
@@ -195,18 +209,50 @@ fun DataViewerScreen(
                                     modifier = Modifier.size(16.dp)
                                 ) {}
                                 Spacer(modifier = Modifier.width(12.dp))
-                                Column {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = cal.effectiveName,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 15.sp,
+                                            modifier = Modifier.testTag("cal_name_${cal.id}")
+                                        )
+                                        IconButton(
+                                            onClick = {
+                                                editingEntityId = cal.id
+                                                editingEntityIsCalendar = true
+                                                editingNameText = cal.customName
+                                            },
+                                            modifier = Modifier
+                                                .size(24.dp)
+                                                .padding(start = 4.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Edit,
+                                                contentDescription = "Rename calendar",
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                    if (cal.customName.isNotBlank()) {
+                                        Text(
+                                            text = "Original: ${cal.displayName}",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                        )
+                                    }
                                     Text(
-                                        text = cal.displayName,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 15.sp
-                                    )
-                                    Text(
-                                        text = "${cal.eventCount} events synchronized",
+                                        text = if (cal.syncEnabled) "${cal.eventCount} events synchronized" else "Sync Disabled",
                                         fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                                        color = if (cal.syncEnabled) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f) else MaterialTheme.colorScheme.error
                                     )
                                 }
+                                Switch(
+                                    checked = cal.syncEnabled,
+                                    onCheckedChange = { enabled -> onToggleCalendarSync(cal.id, enabled) },
+                                    modifier = Modifier.testTag("toggle_cal_sync_${cal.id}")
+                                )
                             }
                         }
                     }
@@ -342,18 +388,50 @@ fun DataViewerScreen(
                                     )
                                 }
                                 Spacer(modifier = Modifier.width(12.dp))
-                                Column {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = book.effectiveName,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 15.sp,
+                                            modifier = Modifier.testTag("book_name_${book.id}")
+                                        )
+                                        IconButton(
+                                            onClick = {
+                                                editingEntityId = book.id
+                                                editingEntityIsCalendar = false
+                                                editingNameText = book.customName
+                                            },
+                                            modifier = Modifier
+                                                .size(24.dp)
+                                                .padding(start = 4.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Edit,
+                                                contentDescription = "Rename address book",
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                    if (book.customName.isNotBlank()) {
+                                        Text(
+                                            text = "Original: ${book.displayName}",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                        )
+                                    }
                                     Text(
-                                        text = book.displayName,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 15.sp
-                                    )
-                                    Text(
-                                        text = "${book.contactCount} contacts synchronized",
+                                        text = if (book.syncEnabled) "${book.contactCount} contacts synchronized" else "Sync Disabled",
                                         fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                                        color = if (book.syncEnabled) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f) else MaterialTheme.colorScheme.error
                                     )
                                 }
+                                Switch(
+                                    checked = book.syncEnabled,
+                                    onCheckedChange = { enabled -> onToggleAddressBookSync(book.id, enabled) },
+                                    modifier = Modifier.testTag("toggle_book_sync_${book.id}")
+                                )
                             }
                         }
                     }
@@ -450,6 +528,52 @@ fun DataViewerScreen(
                     }
                 }
             }
+        }
+
+        editingEntityId?.let { targetId ->
+            AlertDialog(
+                onDismissRequest = { editingEntityId = null },
+                title = {
+                    Text(if (editingEntityIsCalendar) "Rename Calendar" else "Rename Address Book")
+                },
+                text = {
+                    Column {
+                        Text(
+                            text = "Set a custom display name. Leave empty to use default server name.",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        OutlinedTextField(
+                            value = editingNameText,
+                            onValueChange = { editingNameText = it },
+                            label = { Text("Custom Name") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("custom_name_input")
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            if (editingEntityIsCalendar) {
+                                onSetCalendarCustomName(targetId, editingNameText.trim())
+                            } else {
+                                onSetAddressBookCustomName(targetId, editingNameText.trim())
+                            }
+                            editingEntityId = null
+                        },
+                        modifier = Modifier.testTag("save_custom_name_btn")
+                    ) {
+                        Text("Save")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { editingEntityId = null }) {
+                        Text("Cancel")
+                    }
+                }
+            )
         }
     }
 }
